@@ -1,0 +1,326 @@
+Summary:
+
+Functions that pass a socket address structure from process to kernel (bind, connect, sendto, sendmsg) 
+Functions that pass a socket address structure from kernel to process (accept, recvfrom, recvmsg, getpeername, getsockname)
+sin_zero is always used to pad out 16 bytes in size. By convention set entire structure to 0 before filling in.
+
+int bind(int, struct sockaddr *, socklen_t);
+
+Method of use:
+
+struct sockaddr_in serv;
+
+---fill in serv{}---
+
+bind(sockfd, (struct sockaddr *) &serv, sizeof(serv));
+
+or
+connect(sockfd, (struct sockaddr *) &serv, sizeof(serv));
+or sendto
+
+accept, recvfrom, getsockname, getpeername:
+
+struct sockaddr_un cli;
+socklen_t len;
+
+len = sizeof(cli);
+getpeername(unixfd, (struct sockaddr *) &cli, &len);
+
+Incomplete Connection Queue - Entry for each SYN that has arrived from a client awaiting for the completion of a TCP three-way handshake. In SYN_RCVD state.
+Complete Connection Queue - Entry for each client for which the three-way handshake has been completed. In ESTABLISHED state.
+
+If a queue is full, a RST (reset) is not ordered and the client TCP will continue to retransmit its SYN.
+
+important variables: listenfd, servaddr, cliaddr, len, LISTENQ, connfd, pid, buff
+
+Close function causes a FIN to be sent to connfd. Every file or socket has a reference count, which is the count of the number of open descriptors refering to this file or socket.
+After socket function, listenfd file table entry has reference count of 1. After accept, connfd file table entry has reference count of 1.
+After fork, both descriptors are shared between the parent and child, so file table entry for both sockets has reference count of 2.
+When parent closes connfd, reference count decreases from 2 to 1. Actual cleanup and deallocation of socket doesn't happen until reference count reaches 0.
+This occurs when child closes connfd.
+
+Structs:
+
+#include <netinet/in.h>
+
+struct in_addr {
+    in_addr_t s_addr;
+}
+
+s_addr - 32-bit IPv4 address in network byte order
+
+struct sockaddr_in {
+    uint8_t sin_len;
+    sa_family_t sin_family;
+    in_port_t sin_port;
+    struct in_addr sin_addr;
+    char sin_zero[8];
+}
+
+sin_len - unsigned integer specifying length of structure (16) [Only need to be used and examined for routing sockets]
+sin_family - family (AF_INET)
+sin_port - 16-bit TCP or UDP port number
+sin_addr - 32-bit IPv4 address in network byte order
+sin_zero - unused
+
+#include <sys/socket.h>
+struct sockaddr {
+    uint8_t sin_len;
+    sa_family_t sin_family;
+    char sa_data[14];
+}
+
+#include <netinet/in.h>
+
+struct in_addr6 {
+    uint8_t s6_addr[16];
+}
+
+s_addr - 128-bit IPv6 address in network byte order
+
+#define SIN6_LEN
+
+struct sockaddr_in6 {
+    uint8_t sin6_len;
+    sa_family_t sin6_family;
+    in_port_t sin6_port;
+    uint32_t sin6_flowinfo;
+    struct in_addr sin6_addr;
+    uint32_t sin6_scope_id;
+}
+sin6_len - length of this struct (28)
+sa_family_t - family (AF_INET)
+sin6_port - transport layer port#
+sin6_flowinfo - flow information, undefined
+s_addr - IPv6 address in network byte order
+sin6_scope_id - set of interfaces for a scop
+
+struct sockaddr_storage {
+    uint8_t ss_len;
+    sa_family_t ss_family;
+    --rest is implementation dependent--
+}
+
+Functions:
+
+Core Functions:
+
+#include <sys/socket.h>
+
+int socket (int family, int type, int protocol);
+Purpose: creates a socket with specified type of communication protocol
+
+Returns non-negative file descriptor if OK, -1 on error
+
+family - AF_INET (IPv4), AF_INET6 (IPv6), AF_LOCAL (Unix domain protocol), AF_ROUTE (Routing sockets), AF_KEY (Key socket)
+type - SOCK_STREAM (stream socket), SOCK_DGRAM (datagram socket), SOCK_SEQPACKET (sequenced packet socket), SOCK_RAW (raw socket)
+protocol (for AF_INET and AF_INET6) - IPPROTO_TCP (TCP transport protocol), IPPROTO_UDP (UDP transport protocol), IPPROTO_STCP (STCP transport protocol)
+
+Valid Combinations:
+
+SOCK_STREAM > AF_INET + TCP/STCP, AF_INET6 + TCP/STCP, AF_LOCAL
+SOCK_DGRAM > AF_INET + UDP, AF_INET6 + UDP, AF_LOCAL
+SOCK_SEQPACKET > AF_INET + STCP, AF_INET6 + STCP, AF_LOCAL
+SOCK_RAW > AF_INET + IPv4, AF_INET6 + IPv6, AF_ROUTE, AF_KEY
+
+#include <sys/socket.h>
+
+int connect(int sockfd, const struct sockaddr *servaddr, socklen_t addrlen);
+Purpose: initiates a handshake or connection from socket. More specifically used by a TCP client to establish connection with TCP server.
+
+Returns 0 if OK, -1 on error
+
+sockfd - socket descriptor returned by the socket function
+servaddr - pointer to socket address structure
+addrlen - socket address structure size
+
+Note: bind does not have to be called before calling connect. The kernel will choose both bind ephemeral port and source IP address if necessary.
+
+
+TCP Error Returns: ETIMEDOUT (no response is received after a while), ECONNREFUSED (response to synchronize SYN is reset RST), EHOSTUNREACH or ENETUNREACH (destination still unreachable after some time)
+
+#include <sys/socket.h>
+
+int bind(int sockfd, const struct sockaddr *myaddr, socklen_t addrlen);
+Purpose: assigns protocol address (ip and port) to a socket
+
+Returns 0 if OK, -1 on error
+
+port = 0: kernel chooses port, port nonzero: process specifies port
+wildcard IP address: kernel chooses IP address, local IP address: process specifies IP address
+wildcard IP address is INADDR_ANY for IPv4. For IPv6, this is serv.sin6_addr = in6addr_any; which is by default IN6ADDR_ANY_INIT in <netinet/in.h>
+
+sockfd - socket descriptor returned by the socket function
+servaddr - pointer to socket address structure
+addrlen - socket address structure size
+
+#include <sys/socket.h>
+
+int listen(int sockfd, int backlog);
+Purpose: When a socket is created using socket function, it is assumed to be active, that is a client socket that will issue the connect function.
+Listen converts an unconnected socket into a passive socket, indicating that the kernel should accept incoming requests to this socket.
+For TCP, the state transitions from CLOSED to LISTEN.
+
+Returns 0 if OK, -1 on error
+
+sockfd - socket descriptor returned by the socket function
+backlog - maximum number of connections that the kernel should queue for this socket (incomplete + complete historically)
+
+Note: This function is usually called after both socket and bind, and must be called before accept.
+
+#include <sys/socket.h>
+
+int accept(int sockfd, struct sockaddr *cliaddr, socklen_t *addrlen);
+Purpose: Called by TCP server to return next completed connection from the front of the completed connection queue.
+
+Returns: non-negative descriptor if OK, -1 on error
+
+sockfd - socket descriptor returned by the socket function
+cliaddr - pointer to socket address structure
+addrlen - socket address structure size
+
+#include <unistd.h>
+
+pid_t fork(void);
+Purpose: forks a child process with return value 0 and continues main parent process returning process ID
+
+Returns: 0 in child, process ID of child in parent, -1 on error
+
+#include <unistd.h>
+
+int execl(const char *pathname, const char *arg0, ... /* (char *) 0 */);
+int execv(const char *pathname, char *const argv[]);
+int execle(const char *pathname, const char *arg0, ... /* (char *) 0, char *const envp[] */);
+
+int execve(const char *pathname, char *const argv[], char *const envp[]);
+int execlp(const char *filename, const char *arg0, ... /* (char *) 0 */);
+int execvp(const char *filename, char *const argv[]);
+
+All 6 return: -1 on error, no return on success
+
+                            call exec
+                            ^
+                            |
+                            system call
+                            |
+execle -- create argv --> execve
+                            ^
+                            |
+                            add envp
+                            |
+execl -- create argv --> execv
+                            ^
+                            |
+                            convert file to path
+                            |
+execlp -- create argv --> execvp
+
+#include <unistd.h>
+
+int close(int sockfd);
+Purpose: Mark the socket as closed and return to the process immediately.
+
+Returns: 0 if OK, -1 on error
+
+sockfd - socket descriptor to close
+
+Note: TCP will still try to send any data already queued to the other end, but after this, normal TCP termination sequence takes place. To send FIN, need shutdown function not close.
+
+#include <sys/socket.h>
+
+int getsockname(int sockfd, struct sockaddr *localaddr, socklen_t *addrlen);
+int getpeername(int sockfd, struct sockaddr *peeraddr, socklen_t *addrlen);
+Purpose: Both returns the protocol address associated with one of the two ends of a network connection, which for IPv4 and IPv6 is combination of IP address and port number.
+
+Both return: 0 if OK, -1 on error
+
+Note:
+After connect successfully returns the TCP client that does not call bind, getsockname returns the local IP address and local port number assigned to the connection by the kernel.
+After calling bind with port number 0 (tell kernel to choose local port number), getsockname returns the local port number that was assigned.
+getsockname can be called to obtain address family of socket.
+For a server that binds a wildcard IP address, once a connection is established with a client (accept successful), the server can call getsockname to obtain local IP address assigned.
+This socket descriptor argument must be that of the connected socket, not the listening socket.
+When a server is execed by a process that call accept, the only way for server to get identity of client is to call getpeername.
+This is done through either passing connfd = accept() through as a command line argument, or always setting a certain descriptor to the connected socket before calling exec.
+(inet sets descriptors 0, 1, and 2 to be the connected socket)
+
+Byte Order:
+
+#include <netinet/in.h>
+
+uint16_t htons(uint16_t host16bitvalue);
+uint32_t htonl(uint32_t host32bitvalue);
+
+Both return: value in network byte order
+
+uint16_t ntohs(uint16_t net16bitvalue);
+uint32_t ntohl(uint32_t net32bitvalue);
+
+Both return: value in host byte order
+
+Byte Manipulation:
+
+#include <strings.h>
+
+void bzero(void *dest, size_t nbytes);
+Sets specified number of bytes to 0 in the destination
+
+void bcopy(const void *src, void *dest, size_t nbytes);
+Moves specified number of bytes from source to destination
+
+int bcmp(const void *ptr1, const void *ptr2, size_t nbytes);
+Compares two arbitrary byte strings
+
+Returns: 0 if equal, nonzero is unequal
+
+#include <strings.h>
+
+void *memset(void *dest, int c, size_t len);
+Sets specified number of bytes to value c in the destination
+
+void *memset(void *dest, const void *src, size_t nbytes);
+Same behavior as bcopy, except arguments are swapped and can't handle overlapping fields
+
+int memcmp(const void *ptr1, const void *ptr2, size_t nbytes);
+Compares two arbitrary strings
+
+Returns: 0 if equal, <0 or >0 if unequal
+
+Address Conversion Functions:
+
+#include <arpa/inet.h>
+
+int inet_aton(const char *strptr, struct in_addr *addrptr);
+Converts C character string pointed to by strptr to 32-bit binary network byte ordered value
+Returns: 1 if string was valid, 0 on error
+
+in_addr_t inet_addr(const char *strptr);
+Does the same conversion, returning the 32-bit binary network byte ordered value
+Returns: 32-bit binary network byte ordered IPv4 address; IN_ADDR_NONE (255.255.255.255) if error
+
+char *inet_ntoa(struct in_addr inaddr);
+Returns: pointer to dot-decimal string
+
+Presentation vs Numeric:
+p (presentation) = ASCII string, n (numeric) = binary value
+
+#include <arpa/inet.h>
+int inet_pton(int family, const char *strptr, void *addrptr);
+Returns: 1 if OK, 0 if input not a valid presentation format, -1 on error
+
+const char *inet_ntop(int family, const void *addrptr, char *strptr, size_t len);
+Returns: pointer to result if OK, NULL on error
+
+Purpose: convert the string (IP address) pointed by strptr, storing binary result though pointer addrptr.
+
+
+struct sockaddr_in addr;
+inet_ntop(AF_INET, &addr.sin_addr, str, sizeof(str));
+for IPv4, or
+
+struct sockaddr_in6 addr6;
+inet_ntop(AF_INET6, &addr6.sin6_addr, str, sizeof(str));
+for IPv6. This makes our code protocol-dependent.
+
+#define INET_ADDRSTRLEN 16 (IPv4 dotted string)
+#define INET6_ADDRSTRLEN 46 (IPv6 hex string)
